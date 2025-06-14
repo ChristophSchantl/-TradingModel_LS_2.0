@@ -306,12 +306,11 @@ def main():
     )
 
     # 1️⃣ Autocomplete
+    ticker_input = ""
     search_text = st.text_input(
         "Ticker suchen (Autocomplete)",
         placeholder="z.B. AAPL, MSFT, GOOG"
     )
-
-    ticker_input = ""
     if len(search_text) > 1:
         suggestions = yahoo_search_suggestions(search_text)
         options     = [f"{sym} – {name}" for sym, name in suggestions]
@@ -320,7 +319,7 @@ def main():
             ticker_input = choice.split(" – ")[0]
             st.success(f"Ticker gesetzt: {ticker_input}")
 
-    # 2️⃣ Fallback
+    # 2️⃣ Fallback, falls noch kein Ticker ausgewählt
     if not ticker_input:
         ticker_input = st.text_input(
             "ODER manuell eingeben",
@@ -328,45 +327,54 @@ def main():
         )
 
     # 3️⃣ Datum & Kapital
-    start_date_input    = st.date_input("Beginn des Analyse-Zeitraums",
-                                       value=date(2024,1,1),
-                                       max_value=date.today())
-    start_capital_input = st.number_input("Startkapital (€)",
-                                          value=10000, min_value=1000,
-                                          step=500, format="%d")
+    start_date_input    = st.date_input(
+        "Beginn des Analyse-Zeitraums",
+        value=date(2024, 1, 1),
+        max_value=date.today()
+    )
+    start_capital_input = st.number_input(
+        "Startkapital (€)",
+        value=10000,
+        min_value=1000,
+        step=500,
+        format="%d"
+    )
 
     st.markdown("---")
     run_button = st.button("🔄 Ergebnisse berechnen")
 
+    # nur wenn der Button gedrückt wurde und ein Ticker eingegeben ist:
+    if run_button:
+        if not ticker_input.strip():
+            st.error("Bitte gib zunächst einen gültigen Ticker ein, z. B. 'AAPL' oder 'MSFT'.")
+            return
 
-
-
-# nur wenn der Button gedrückt wurde und ein Ticker eingegeben ist:
-if run_button:
-    if ticker_input.strip() == "":
-        st.error("Bitte gib zunächst einen gültigen Ticker ein, z. B. 'AAPL' oder 'MSFT'.")
-    else:
         start_date_str = start_date_input.strftime("%Y-%m-%d")
         with st.spinner("⏳ Berechne Signale und Trades… bitte einen Moment warten"):
-            results = optimize_and_run(ticker_input, start_date_str, float(start_capital_input))
+            results = optimize_and_run(
+                ticker=ticker_input,
+                start_date=start_date_str,
+                start_capital=float(start_capital_input)
+            )
 
-        trades_df = results["trades_df"]
-        strategy_return = results["strategy_return"]
+        # Ergebnisse entpacken
+        trades_df           = results["trades_df"]
+        strategy_return     = results["strategy_return"]
         buy_and_hold_return = results["buy_and_hold_return"]
-        total_trades = results["total_trades"]
-        long_trades = results["long_trades"]
-        short_trades = results["short_trades"]
-        pos_count = results["pos_count"]
-        neg_count = results["neg_count"]
-        pos_pct = results["pos_pct"]
-        neg_pct = results["neg_pct"]
-        pos_pnl = results["pos_pnl"]
-        neg_pnl = results["neg_pnl"]
-        total_pnl = results["total_pnl"]
-        pos_perf = results["pos_perf"]
-        neg_perf = results["neg_perf"]
-        df_plot = results["df_plot"]
-        df_wealth = results["df_wealth"]
+        total_trades        = results["total_trades"]
+        long_trades         = results["long_trades"]
+        short_trades        = results["short_trades"]
+        pos_count           = results["pos_count"]
+        neg_count           = results["neg_count"]
+        pos_pct             = results["pos_pct"]
+        neg_pct             = results["neg_pct"]
+        pos_pnl             = results["pos_pnl"]
+        neg_pnl             = results["neg_pnl"]
+        total_pnl           = results["total_pnl"]
+        pos_perf            = results["pos_perf"]
+        neg_perf            = results["neg_perf"]
+        df_plot             = results["df_plot"]
+        df_wealth           = results["df_wealth"]
 
         # ---------------------------------------
         # 1. Performance-Vergleich (Strategie vs. Buy & Hold)
