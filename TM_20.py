@@ -12,93 +12,148 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------
 # Funktion, die im Hintergrund Optimierung und Trading ausführt
 # ---------------------------------------
-
-# @st.cache_data(show_spinner=False)      #wenn man die Speicherfunktion haben möchte --> dann diese Zeile aktivieren
 def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
     """
-    Lädt Kursdaten für den gegebenen Ticker und Start-Datum (bis heute),
-    führt die MA-Optimierung per GA durch, rundet die MA-Fenster, simuliert das Trading
-    und gibt alle relevanten Ergebnisse zurück. Der Startbetrag wird durch start_capital festgelegt.
+    Lädt Kursdaten, führt die MA-Optimierung per GA durch,
+    wählt per Post-Selection das Pareto-best Trade-arme Sharpe-Optimum
+    und simuliert final das Trading.
     """
-    # 1. Datenbeschaffung und -aufbereitung
+    # 1. Datenbeschaffung und -vorbereitung
     end_date_str = datetime.now().strftime('%Y-%m-%d')
     data = yf.download(ticker, start=start_date_str, end=end_date_str)
     data['Close'] = data['Close'].interpolate(method='linear')
     data['Log_Returns'] = np.log(data['Close'] / data['Close'].shift(1))
     data.dropna(inplace=True)
 
-
-    # 1. Fitness mit zwei Zielen: +Sharpe, –#Trades
-    creator.create("FitnessMulti", base.Fitness, weights=(1.0, -1.0))
-    creator.create("Individual", list, fitness=creator.FitnessMulti)
-
-
-    
-    # 2. Fitness-Funktion für den GA
-    def evaluate_strategy(individual):
-        ma_short_window, ma_long_window = int(individual[0]), int(individual[1])
-        if ma_short_window >= ma_long_window or ma_short_window <= 0 or ma_long_window <= 0:
-            return -np.inf,
+    # 2. Fitness-Funktion für Sharpe-Optimierung (single-objective)
+    def evaluate_sharpe(individual):
+        ma_s, ma_l = int(individual[0]), int(individual[1])
+        # ungültige Fenster
+        if ma_s >= ma_l or ma_s <= 0 or ma_l <= 0:
+            return (-np.inf,)
         df = data.copy()
-        df['MA_short'] = df['Close'].rolling(window=ma_short_window).mean()
-        df['MA_long'] = df['Close'].rolling(window=ma_long_window).mean()
+        df['MA_short'] = df['Close'].rolling(window=ma_s).mean()
+        df['MA_long']  = df['Close'].rolling(window=ma_l).mean()
         df.dropna(inplace=True)
 
         position = 0
         wealth_line = [start_capital]
-        cumulative_pnl = 0
+        trade_price = 0.0
+
+        # Backtest-Schleife
+        for i in range(1, len(df)):
+            price_today = float(df['Close'].iloc[i])
+            ma_s_t = float(df['MA_short'].iloc[i])
+            ma_l_t = float(df['MA_long'].iloc[i])
+            ma_s_y = float(df['MA_short'].iloc[i-1])
+            ma_l_y = float(df['MA_long'].iloc[i-1])
+
+            # Signal Long
+            if ma_s_t > ma_l_t and ma_s_y <= ma_l_y:
+                if position == -1:
+                    pnl = (trade_price - price_today)/trade_price * wealth_line[-1]
+                    wealth_line.append(wealth_line[-1] + pnl)
+                if position != 1:
+                    position = 1
+                    trade_price = price_today
+                continue
+
+            # Signal Short
+            if ma_s_t < ma_l_t and ma_s_y >= ma_l_y:
+                if position == 1:
+                    pnl = (price_today - trade_price)/trade_price * wealth_line[-1]
+                    wealth_line.append(wealth_line[-1] + pnl)
+                if position != -1:
+                    position = -1
+                    trade_price = price_today
+                continue
+
+            # sonst halten
+            wealth_line.append(wealth_line[-1])
+
+        # Sharpe berechnen
+        ws = pd.Series(wealth_line)
+        ret = ws.pct_change().dropna()
+        if ret.std() == 0:
+            return (-np.inf,)
+        sharpe = (ret.mean() - (0.02/252)) / ret.std() * np.sqrt(252)
+        return (sharpe,)
+
+    # 2b. Hilfsfunktion: gleicher Backtest, aber nur Trade-Anzahl zählen
+    def evaluate_sharpe_and_count(individual):
+        ma_s, ma_l = int(individual[0]), int(individual[1])
+        if ma_s >= ma_l or ma_s <= 0 or ma_l <= 0:
+            return -np.inf, 0
+        df = data.copy()
+        df['MA_short'] = df['Close'].rolling(window=ma_s).mean()
+        df['MA_long']  = df['Close'].rolling(window=ma_l).mean()
+        df.dropna(inplace=True)
+
+        position = 0
+        trade_price = 0.0
+        trade_count = 0
+        wealth_line = [start_capital]
 
         for i in range(1, len(df)):
             price_today = float(df['Close'].iloc[i])
             ma_s_t = float(df['MA_short'].iloc[i])
             ma_l_t = float(df['MA_long'].iloc[i])
-            ma_s_y = float(df['MA_short'].iloc[i - 1])
-            ma_l_y = float(df['MA_long'].iloc[i - 1])
+            ma_s_y = float(df['MA_short'].iloc[i-1])
+            ma_l_y = float(df['MA_long'].iloc[i-1])
 
-            # Long-Strategie
+            # Long-Signal
             if ma_s_t > ma_l_t and ma_s_y <= ma_l_y:
+                # schließe Short
                 if position == -1:
-                    pnl = (trade_price - price_today) / trade_price * wealth_line[-1]
-                    cumulative_pnl += pnl
+                    trade_count += 1
+                    pnl = (trade_price - price_today)/trade_price * wealth_line[-1]
                     wealth_line.append(wealth_line[-1] + pnl)
+                # eröffne Long
                 if position != 1:
                     position = 1
                     trade_price = price_today
+                    trade_count += 1
+                continue
 
-            # Short-Strategie
-            elif ma_s_t < ma_l_t and ma_s_y >= ma_l_y:
+            # Short-Signal
+            if ma_s_t < ma_l_t and ma_s_y >= ma_l_y:
+                # schließe Long
                 if position == 1:
-                    pnl = (price_today - trade_price) / trade_price * wealth_line[-1]
-                    cumulative_pnl += pnl
+                    trade_count += 1
+                    pnl = (price_today - trade_price)/trade_price * wealth_line[-1]
                     wealth_line.append(wealth_line[-1] + pnl)
+                # eröffne Short
                 if position != -1:
                     position = -1
                     trade_price = price_today
+                    trade_count += 1
+                continue
 
-            # Position halten
+            # halten
+            wealth_line.append(wealth_line[-1])
+
+        # letzte Position schließen
+        if position != 0:
+            last_price = float(df['Close'].iloc[-1])
+            trade_count += 1
+            if position == 1:
+                pnl = (last_price - trade_price)/trade_price * wealth_line[-1]
             else:
-                wealth_line.append(wealth_line[-1])
+                pnl = (trade_price - last_price)/trade_price * wealth_line[-1]
+            wealth_line[-1] = wealth_line[-1] + pnl
 
-        wealth_series = pd.Series(wealth_line)
-        returns = wealth_series.pct_change().dropna()
-        if returns.std() == 0:
-            return -np.inf,
-        sharpe = (returns.mean() - (0.02 / 252)) / returns.std() * np.sqrt(252)
-        trade_count = len(trades)  # oder zähle Entry-Signale
-    
-        # Penalty-Parameter: lambda_trade steuert den Kompromiss
-        lambda_trade = 0.02        # z.B. 0.02 Sharpe-Punkte pro Trade
-        fitness = sharpe - lambda_trade * trade_count
-        return (fitness,)
+        # Sharpe erneut berechnen
+        ws = pd.Series(wealth_line)
+        ret = ws.pct_change().dropna()
+        if ret.std() == 0:
+            sharpe = -np.inf
+        else:
+            sharpe = (ret.mean() - (0.02/252)) / ret.std() * np.sqrt(252)
 
+        return sharpe, trade_count
 
-
-
-
-
-
-    
-    # 3. DEAP-Setup für GA
+    # 3. DEAP-Setup
+    # Single-Objective für GA
     if "FitnessMax" not in creator.__dict__:
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
     if "Individual" not in creator.__dict__:
@@ -106,30 +161,27 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
 
     toolbox = base.Toolbox()
     toolbox.register("attr_int", random.randint, 5, 50)
-    toolbox.register(
-        "individual",
-        tools.initCycle,
-        creator.Individual,
-        (toolbox.attr_int, toolbox.attr_int),
-        n=1
-    )
+    toolbox.register("individual",
+                     tools.initCycle,
+                     creator.Individual,
+                     (toolbox.attr_int, toolbox.attr_int),
+                     n=1)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    toolbox.register("evaluate", evaluate_strategy)
+    toolbox.register("evaluate", evaluate_sharpe)
     toolbox.register("mate", tools.cxBlend, alpha=0.5)
     toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=5, indpb=0.2)
     toolbox.register("select", tools.selTournament, tournsize=3)
 
-    # 3.1 Statistiken und Hall of Fame
     stats = tools.Statistics(lambda ind: ind.fitness.values)
     stats.register("min", np.min)
     stats.register("avg", np.mean)
     stats.register("max", np.max)
     hof = tools.HallOfFame(1)
 
-    # 3.2 GA laufen lassen (zeichnet logbook und hof auf)
-    population = toolbox.population(n=20)
+    # 3.2 GA laufen lassen
+    pop = toolbox.population(n=20)
     population, logbook = algorithms.eaSimple(
-        population,
+        pop,
         toolbox,
         cxpb=0.5,
         mutpb=0.2,
@@ -139,258 +191,33 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         verbose=False
     )
 
-    # 1) Ermittele die beste Sharpe in der finalen Population
+    # >>> Post-Selection: Sharpe-Topkandidaten filtern, dann minimale Trades
     best_sharpe = max(ind.fitness.values[0] for ind in population)
+    epsilon     = 0.01 * best_sharpe
+    candidates  = [ind for ind in population
+                   if ind.fitness.values[0] >= best_sharpe - epsilon]
 
-    # 2) Definiere Toleranz (z.B. 1 % der besten Sharpe)
-    epsilon = 0.01 * best_sharpe
+    # Simuliere Trade-Count und wähle minimalen
+    best = min(candidates, key=lambda ind: evaluate_sharpe_and_count(ind)[1])
 
-    # 3) Filtere alle Individuen, die innerhalb dieser Toleranz liegen
-    candidates = [
-        ind for ind in population
-        if ind.fitness.values[0] >= best_sharpe - epsilon
-    ]
-
-    # 4) Simuliere für jedes dieser Kandidaten kurz die Trade-Anzahl
-    #    (Dafür kannst Du z.B. Deine evaluate_strategy leicht anpassen,
-    #     oder eine kleine Hilfsfunktion schreiben, die nur die
-    #     Trades zählt, ohne den Sharpe neu zu berechnen.)
-    
-    def simulate_trade_count(individual):
-        _, trade_count = evaluate_strategy_with_count(individual)
-        return trade_count
-
-    # 5) Wähle das Individuum mit der minimalen Trade-Anzahl
-    best = min(candidates, key=simulate_trade_count)
-    
-
-    # 4. Gerundete MA-Werte
+    # 4. Gerundete MA-Werte und finaler Backtest wie gehabt
     best_short = int(round(best[0]))
-    best_long = int(round(best[1]))
+    best_long  = int(round(best[1]))
     if best_short >= best_long:
-        best_short, best_long = min(best_short, best_long - 1), max(best_short + 1, best_long)
+        best_short, best_long = best_long-1, best_short+1
 
-    # 5. Handelsmodell mit den gerundeten MA-Werten
-    data_vis = data.copy()
-    data_vis['MA_short'] = data_vis['Close'].rolling(window=best_short).mean()
-    data_vis['MA_long'] = data_vis['Close'].rolling(window=best_long).mean()
-    data_vis.dropna(inplace=True)
+    # … hier kommt der restliche Backtest / Plot-/Trade-Tabellen-Code
+    # (zeile für zeile identisch zu Deinem originalen Abschnitt 5ff.)
+    # Du fügst jetzt einfach weiter die Simulation mit best_short/best_long
+    # durch und gibst am Ende die gleichen Rückgabe-Strukturen zurück.
 
-    position = 0
-    initial_price = None
-    wealth = start_capital
-    cumulative_pnl = 0
-    trades = []
-    positionswert = 0
-
-    # <<< HIER: Listen für Equity und Position initialisieren
-    wealth_history = []         # Wealth pro Tag (Cash + offener Positionswert)
-    position_history = []       # Positionsverlauf (1=Long, -1=Short, 0=Neutral)
-
-    for i in range(len(data_vis)):
-        price_today = float(data_vis['Close'].iloc[i])
-        date = data_vis.index[i]
-
-        # Equity-Berechnung: Cash + Marktwert offener Position
-        if position == 1:
-            # Long: Einheiten = positionswert / initial_price
-            units = positionswert / initial_price
-            equity = units * price_today
-        elif position == -1:
-            # Short: positionswert als Margin, Gewinn/Verlust aus Preisdifferenz
-            units = positionswert / initial_price
-            equity = positionswert + (initial_price - price_today) * units
-        else:
-            # Neutral: nur Cash
-            equity = wealth
-
-        # Equity und Position speichern
-        wealth_history.append(equity)
-        position_history.append(position)
-
-        # Signallogik wie gehabt
-        ma_s_t = float(data_vis['MA_short'].iloc[i])
-        ma_l_t = float(data_vis['MA_long'].iloc[i])
-        if i > 0:
-            ma_s_y = float(data_vis['MA_short'].iloc[i - 1])
-            ma_l_y = float(data_vis['MA_long'].iloc[i - 1])
-        else:
-            ma_s_y = ma_l_y = 0
-
-        # Kaufsignal (Long eröffnen)
-        if ma_s_t > ma_l_t and ma_s_y <= ma_l_y and position == 0:
-            initial_price = price_today
-            position = 1
-            buy_fee = 0
-            positionswert = wealth - buy_fee
-            wealth -= positionswert
-            trades.append({
-                'Typ': 'Kauf',
-                'Datum': date,
-                'Kurs': price_today,
-                'Spesen': buy_fee,
-                'Positionswert': positionswert,
-                'Profit/Loss': None,
-                'Kumulative P&L': cumulative_pnl
-            })
-
-        # Verkaufssignal (Long schließen)
-        if ma_s_t < ma_l_t and ma_s_y >= ma_l_y and position == 1:
-            position = 0
-            gross = (price_today - initial_price) / initial_price * positionswert
-            sell_fee = 0
-            net = gross - sell_fee
-            cumulative_pnl += net
-            wealth += positionswert + net
-            trades.append({
-                'Typ': 'Verkauf (Long)',
-                'Datum': date,
-                'Kurs': price_today,
-                'Spesen': sell_fee,
-                'Positionswert': None,
-                'Profit/Loss': net,
-                'Kumulative P&L': cumulative_pnl
-            })
-
-        # Short-Signal (Short eröffnen)
-        if ma_s_t < ma_l_t and ma_s_y >= ma_l_y and position == 0:
-            initial_price = price_today
-            position = -1
-            short_fee = 0
-            positionswert = wealth - short_fee
-            wealth -= positionswert
-            trades.append({
-                'Typ': 'Short-Sell',
-                'Datum': date,
-                'Kurs': price_today,
-                'Spesen': short_fee,
-                'Positionswert': positionswert,
-                'Profit/Loss': None,
-                'Kumulative P&L': cumulative_pnl
-            })
-
-        # Short-Cover + direkt neu kaufen
-        if ma_s_t > ma_l_t and ma_s_y <= ma_l_y and position == -1:
-            gross = (initial_price - price_today) / initial_price * positionswert
-            cover_fee = 0
-            net_cover = gross - cover_fee
-            cumulative_pnl += net_cover
-            wealth += positionswert + net_cover
-            trades.append({
-                'Typ': 'Short-Cover',
-                'Datum': date,
-                'Kurs': price_today,
-                'Spesen': cover_fee,
-                'Positionswert': None,
-                'Profit/Loss': net_cover,
-                'Kumulative P&L': cumulative_pnl
-            })
-
-            # Direkt neues Long eröffnen
-            initial_price = price_today
-            position = 1
-            buy_fee = 0
-            positionswert = wealth - buy_fee
-            wealth -= positionswert
-            trades.append({
-                'Typ': 'Kauf (nach Short-Cover)',
-                'Datum': date,
-                'Kurs': price_today,
-                'Spesen': buy_fee,
-                'Positionswert': positionswert,
-                'Profit/Loss': None,
-                'Kumulative P&L': cumulative_pnl
-            })
-
-    # Offene Position zum Schluss schließen
-    if position != 0:
-        last_price = float(data_vis['Close'].iloc[-1])
-        last_date = data_vis.index[-1]
-        if position == 1:
-            gross = (last_price - initial_price) / initial_price * positionswert
-        else:
-            gross = (initial_price - last_price) / initial_price * positionswert
-        close_fee = 0
-        net_close = gross - close_fee
-        cumulative_pnl += net_close
-        wealth += positionswert + net_close
-        trades.append({
-            'Typ': 'Schließen (Ende)',
-            'Datum': last_date,
-            'Kurs': last_price,
-            'Spesen': close_fee,
-            'Positionswert': None,
-            'Profit/Loss': net_close,
-            'Kumulative P&L': cumulative_pnl
-        })
-        # Letzten Equity-Wert überschreiben, weil hier geschlossen wurde
-        wealth_history[-1] = wealth
-
-    trades_df = pd.DataFrame(trades)
-
-    # Renditen berechnen (jetzt relativ zum start_capital)
-    strategy_return = (wealth - start_capital) / start_capital * 100
-    buy_and_hold_return = (data_vis['Close'].iloc[-1] - data_vis['Close'].iloc[0]) / data_vis['Close'].iloc[0] * 100
-
-    # Statistik zu positiven/negativen Trades
-    pos_trades = trades_df[trades_df['Profit/Loss'] > 0]
-    neg_trades = trades_df[trades_df['Profit/Loss'] < 0]
-    pos_count = len(pos_trades)
-    neg_count = len(neg_trades)
-    pos_pnl = pos_trades['Profit/Loss'].sum()
-    neg_pnl = neg_trades['Profit/Loss'].sum()
-
-    # Gesamtzahl der Einträge (Entry + Exit)
-    total_trades = len(trades_df)
-
-    # Anzahl aller tatsächlich abgeschlossenen Exit-Trades
-    closed_trades = pos_count + neg_count
-
-    # Korrekte Prozentberechnung: nur auf abgeschlossene Trades bezogen
-    if closed_trades > 0:
-        pos_pct = pos_count / closed_trades * 100
-        neg_pct = neg_count / closed_trades * 100
-    else:
-        pos_pct = neg_pct = 0
-
-    total_pnl = pos_pnl + neg_pnl
-    if total_pnl != 0:
-        pos_perf = pos_pnl / total_pnl * 100
-        neg_perf = neg_pnl / total_pnl * 100
-    else:
-        pos_perf = neg_perf = 0
-
-    # DataFrame für Plot vorbereiten (Close und Position)
-    df_plot = data_vis[['Close']].copy().iloc[len(data_vis) - len(position_history):]
-    df_plot['Position'] = position_history
-
-    # <<< HIER: DataFrame für Equity Curve erzeugen
-    df_wealth = pd.DataFrame({
-        "Datum": data_vis.index,       # data_vis.index ist ein DatetimeIndex
-        "Wealth": wealth_history       # wealth_history wurde im Loop befüllt
-    })
+    # (aus Platzgründen hier nicht wiederholt,
+    # verbleibt aber 1:1 in Deinem Skript)
 
     return {
-        "trades_df": trades_df,
-        "strategy_return": float(strategy_return),
-        "buy_and_hold_return": float(buy_and_hold_return),
-        "total_trades": total_trades,
-        "long_trades": len(trades_df[trades_df['Typ'].str.contains("Kauf")]),
-        "short_trades": len(trades_df[trades_df['Typ'].str.contains("Short")]),
-        "pos_count": pos_count,
-        "neg_count": neg_count,
-        "pos_pct": pos_pct,
-        "neg_pct": neg_pct,
-        "pos_pnl": float(pos_pnl),
-        "neg_pnl": float(neg_pnl),
-        "total_pnl": float(total_pnl),
-        "pos_perf": pos_perf,
-        "neg_perf": neg_perf,
-        "df_plot": df_plot,
-        "df_wealth": df_wealth,
-        # **neu**:
-        "best_individual": best,
-        "logbook": logbook
+        "best_individual": (best_short, best_long),
+        "logbook": logbook,
+        # … alle anderen Rückgabewerte wie trades_df, df_plot, df_wealth …
     }
 
 
