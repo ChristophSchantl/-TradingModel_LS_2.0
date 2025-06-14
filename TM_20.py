@@ -154,7 +154,21 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
     df_bt = df_bt.dropna()
     
     if df_bt.empty:
-        raise ValueError("Keine Daten nach MA-Berechnung")
+        return {
+            "best_params": (bs, bl),
+            "logbook": logbook,
+            "trades": pd.DataFrame([{
+                'Typ': 'Keine Trades',
+                'Datum': pd.NaT,
+                'Preis': 0,
+                'Position': 0,
+                'P&L': 0
+            }]),
+            "strategy_return": 0,
+            "buy_hold_return": 0,
+            "price_data": pd.DataFrame(),
+            "wealth_data": pd.DataFrame()
+        }
 
     position = 0
     entry_price = 0.0
