@@ -14,10 +14,6 @@ import requests
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def yahoo_search_suggestions(query: str, count: int = 6) -> list[tuple[str, str]]:
-    """
-    Fragt Yahoo Finance nach Symbol-Vorschlägen.
-    Gibt eine Liste von (symbol, name)-Tupeln zurück.
-    """
     if not query:
         return []
     url = (
@@ -305,29 +301,25 @@ def main():
         "Bitte wähle unten den Ticker (Yahoo Finance), den Beginn des Zeitraums und das Startkapital aus."
     )
 
-    # 1️⃣ Autocomplete
-    ticker_input = ""
+    # 1️⃣ Autocomplete-Eingabe
     search_text = st.text_input(
         "Ticker suchen (Autocomplete)",
         placeholder="z.B. AAPL, MSFT, GOOG"
     )
+
+    options = []
     if len(search_text) > 1:
         suggestions = yahoo_search_suggestions(search_text)
-        options     = [f"{sym} – {name}" for sym, name in suggestions]
-        choice      = st.selectbox("Gefundene Symbole", [""] + options)
-        if choice and st.button("✓ Übernehmen"):
-            ticker_input = choice.split(" – ")[0]
-            st.success(f"Ticker gesetzt: {ticker_input}")
+        options = [sym for sym, _ in suggestions]
 
-    # 2️⃣ Fallback, falls noch kein Ticker ausgewählt
-    if not ticker_input:
-        ticker_input = st.text_input(
-            "ODER manuell eingeben",
-            placeholder="z.B. GOOG"
-        )
+    ticker_select = st.selectbox("Gefundene Symbole", [""] + options)
+    ticker_manual = st.text_input("ODER manuell eingeben", placeholder="z.B. GOOG")
 
-    # 3️⃣ Datum & Kapital
-    start_date_input    = st.date_input(
+    # kombiniert: wenn selectbox leer, dann manuelle Eingabe
+    ticker_input = ticker_select or ticker_manual
+
+    # 2️⃣ Datum & Kapital
+    start_date_input = st.date_input(
         "Beginn des Analyse-Zeitraums",
         value=date(2024, 1, 1),
         max_value=date.today()
@@ -343,7 +335,6 @@ def main():
     st.markdown("---")
     run_button = st.button("🔄 Ergebnisse berechnen")
 
-    # nur wenn der Button gedrückt wurde und ein Ticker eingegeben ist:
     if run_button:
         if not ticker_input.strip():
             st.error("Bitte gib zunächst einen gültigen Ticker ein, z. B. 'AAPL' oder 'MSFT'.")
