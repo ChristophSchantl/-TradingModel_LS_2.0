@@ -394,14 +394,6 @@ st.markdown("""
 Bitte wähle unten den Ticker (Yahoo Finance) , den Beginn des Zeitraums und das Startkapital aus.  
 """)
 
-st.markdown("### 1️⃣ Welchen Aktien-Ticker möchtest du analysieren?")
-
-# 1. Freitext-Suche
-search_text = st.text_input(
-    label="Ticker suchen (Autocomplete)",
-    placeholder="z.B. AAPL, M S F T",
-    help="Beginne zu tippen und wähle aus den Vorschlägen."
-)
 
 # 2. Vorschläge abrufen und anzeigen
 ticker_input = ""
