@@ -14,16 +14,28 @@ import requests
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def yahoo_search_suggestions(query: str, count: int = 6) -> list[tuple[str, str]]:
+    """
+    Fragt Yahoo Finance nach Symbol-Vorschlägen.
+    Gibt eine Liste von (symbol, name)-Tupeln zurück.
+    Bei Netzwerk- oder JSON-Fehlern wird [] zurückgegeben.
+    """
     if not query:
         return []
     url = (
         "https://query1.finance.yahoo.com/v1/finance/search"
         f"?q={query}&quotesCount={count}&newsCount=0"
     )
-    resp = requests.get(url)
-    data = resp.json().get("quotes", [])
+    try:
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()  # HTTP-Fehler (4xx,5xx) als Exception
+        payload = resp.json()
+    except (requests.exceptions.RequestException, ValueError):
+        # z.B. Timeout, ConnectionError, JSONDecodeError
+        return []
+
+    quotes = payload.get("quotes", [])
     results = []
-    for item in data:
+    for item in quotes:
         sym  = item.get("symbol", "")
         name = item.get("shortname") or item.get("longname") or ""
         results.append((sym, name))
