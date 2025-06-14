@@ -10,399 +10,322 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+
 # ---------------------------------------
-# 1) Funktion: GA‐Optimierung + Post‐Selection + Backtest
+# 1) GA-Optimierung + Post-Selection + finaler Backtest
 # ---------------------------------------
 def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
-    # Daten laden
+    # --- Daten laden ---
     end_date_str = datetime.now().strftime("%Y-%m-%d")
     data = yf.download(ticker, start=start_date_str, end=end_date_str)
+    if data is None or data.empty or 'Close' not in data:
+        raise ValueError("Keine Kursdaten für diesen Ticker/Zeitraum.")
     data['Close'] = data['Close'].interpolate()
-    data.dropna(inplace=True)
+    data.dropna(subset=['Close'], inplace=True)
     prices = data['Close']
+    if len(prices) < 2:
+        raise ValueError("Zu wenige Datenpunkte.")
 
-    # Fitness: nur Sharpe‐Ratio
+    # --- Fitness: nur Sharpe-Ratio ---
     def evaluate_sharpe(ind):
-        s, l = int(ind[0]), int(ind[1])
-        if s >= l or s <= 0 or l <= 0:
+        s, l = map(int, ind)
+        # ungültige Parameter
+        if s >= l or s <= 0:
             return (-np.inf,)
-        ma_s = prices.rolling(window=s).mean()
-        ma_l = prices.rolling(window=l).mean()
-        df = pd.DataFrame({'Price': prices, 'MA_s': ma_s, 'MA_l': ma_l}).dropna()
+        # Rolling MAs
+        ma_s = prices.rolling(s).mean()
+        ma_l = prices.rolling(l).mean()
+        # DataFrame via concat (kein Scalar-Fehler)
+        df = pd.concat([
+            prices.rename('Price'),
+            ma_s.rename('MA_s'),
+            ma_l.rename('MA_l')
+        ], axis=1).dropna()
         if df.empty:
             return (0.0,)
         wealth = [start_capital]
         pos = 0
-        trade_price = 0.0
+        entry_price = 0.0
         for i in range(1, len(df)):
             p = df['Price'].iat[i]
+            # Kaufsignal
             if df['MA_s'].iat[i] > df['MA_l'].iat[i] and df['MA_s'].iat[i-1] <= df['MA_l'].iat[i-1]:
                 if pos == -1:
-                    pnl = (trade_price - p) / trade_price * wealth[-1]
+                    pnl = (entry_price - p) / entry_price * wealth[-1]
                     wealth.append(wealth[-1] + pnl)
-                if pos != 1:
-                    pos, trade_price = 1, p
-                else:
-                    wealth.append(wealth[-1])
+                pos, entry_price = 1, p
                 continue
+            # Verkaufssignal
             if df['MA_s'].iat[i] < df['MA_l'].iat[i] and df['MA_s'].iat[i-1] >= df['MA_l'].iat[i-1]:
                 if pos == 1:
-                    pnl = (p - trade_price) / trade_price * wealth[-1]
+                    pnl = (p - entry_price) / entry_price * wealth[-1]
                     wealth.append(wealth[-1] + pnl)
-                if pos != -1:
-                    pos, trade_price = -1, p
-                else:
-                    wealth.append(wealth[-1])
+                pos, entry_price = -1, p
                 continue
             wealth.append(wealth[-1])
         rets = pd.Series(wealth).pct_change().dropna()
         if rets.std() == 0:
-            return (-np.inf,)
-        sharpe = (rets.mean()) / rets.std() * np.sqrt(252)
+            return (0.0,)
+        sharpe = rets.mean() / rets.std() * np.sqrt(252)
         return (sharpe,)
 
-    # Fitness+Count: Sharpe + Anzahl Trades
+    # --- Fitness+Count: Sharpe & Trade-Anzahl ---
     def evaluate_sharpe_count(ind):
-        s, l = int(ind[0]), int(ind[1])
-        if s >= l or s <= 0 or l <= 0:
+        s, l = map(int, ind)
+        if s >= l or s <= 0:
             return -np.inf, 0
-        ma_s = prices.rolling(window=s).mean()
-        ma_l = prices.rolling(window=l).mean()
-        df = pd.DataFrame({'Price': prices, 'MA_s': ma_s, 'MA_l': ma_l}).dropna()
+        ma_s = prices.rolling(s).mean()
+        ma_l = prices.rolling(l).mean()
+        df = pd.concat([
+            prices.rename('Price'),
+            ma_s.rename('MA_s'),
+            ma_l.rename('MA_l')
+        ], axis=1).dropna()
         if df.empty:
             return 0.0, 0
         wealth = [start_capital]
         pos = 0
-        trade_price = 0.0
+        entry_price = 0.0
         trades = 0
         for i in range(1, len(df)):
             p = df['Price'].iat[i]
-            # Long‐Signal
+            # Long-Entry
             if df['MA_s'].iat[i] > df['MA_l'].iat[i] and df['MA_s'].iat[i-1] <= df['MA_l'].iat[i-1]:
+                trades += (1 if pos != 1 else 0)
                 if pos == -1:
-                    trades += 1
-                    pnl = (trade_price - p) / trade_price * wealth[-1]
+                    pnl = (entry_price - p) / entry_price * wealth[-1]
                     wealth.append(wealth[-1] + pnl)
-                if pos != 1:
-                    trades += 1
-                    pos, trade_price = 1, p
-                else:
-                    wealth.append(wealth[-1])
+                pos, entry_price = 1, p
                 continue
-            # Short‐Signal
+            # Short-Entry
             if df['MA_s'].iat[i] < df['MA_l'].iat[i] and df['MA_s'].iat[i-1] >= df['MA_l'].iat[i-1]:
+                trades += (1 if pos != -1 else 0)
                 if pos == 1:
-                    trades += 1
-                    pnl = (p - trade_price) / trade_price * wealth[-1]
+                    pnl = (p - entry_price) / entry_price * wealth[-1]
                     wealth.append(wealth[-1] + pnl)
-                if pos != -1:
-                    trades += 1
-                    pos, trade_price = -1, p
-                else:
-                    wealth.append(wealth[-1])
+                pos, entry_price = -1, p
                 continue
             wealth.append(wealth[-1])
         # letzte Position schließen
         if pos != 0:
             trades += 1
             p = df['Price'].iat[-1]
-            if pos == 1:
-                pnl = (p - trade_price) / trade_price * wealth[-1]
-            else:
-                pnl = (trade_price - p) / trade_price * wealth[-1]
+            pnl = ((entry_price - p) / entry_price if pos==-1 else (p - entry_price) / entry_price) * wealth[-1]
             wealth[-1] += pnl
         rets = pd.Series(wealth).pct_change().dropna()
-        sharpe = 0.0 if rets.std() == 0 else (rets.mean()) / rets.std() * np.sqrt(252)
+        sharpe = 0.0 if rets.std()==0 else rets.mean()/rets.std()*np.sqrt(252)
         return sharpe, trades
 
-    # DEAP‐Setup (Single‐Objective Sharpe)
+    # --- DEAP Setup ---
     if "FitnessMax" not in creator.__dict__:
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
         creator.create("Individual", list, fitness=creator.FitnessMax)
 
     toolbox = base.Toolbox()
-    toolbox.register("attr_int", random.randint, 5, 200)
-    toolbox.register("individual", tools.initCycle, creator.Individual,
-                     (toolbox.attr_int, toolbox.attr_int), n=1)
+    toolbox.register("attr_s", random.randint, 5, 50)
+    toolbox.register("attr_l", random.randint, 10, 200)
+    def init_ind():
+        s = toolbox.attr_s()
+        l = toolbox.attr_l()
+        # sicherstellen s<l
+        return creator.Individual([min(s, l-1), max(s+1, l)])
+    toolbox.register("individual", init_ind)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("evaluate", evaluate_sharpe)
-    toolbox.register("mate", tools.cxBlend, alpha=0.5)
-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=10, indpb=0.2)
+    toolbox.register("mate", tools.cxTwoPoint)
+    toolbox.register("mutate", tools.mutUniformInt,
+                     low=[5,10], up=[50,200], indpb=0.2)
     toolbox.register("select", tools.selTournament, tournsize=3)
 
+    pop = toolbox.population(n=30)
     stats = tools.Statistics(lambda ind: ind.fitness.values[0])
-    stats.register("min", np.min)
-    stats.register("avg", np.mean)
     stats.register("max", np.max)
+    stats.register("avg", np.mean)
     hof = tools.HallOfFame(1)
 
-    pop = toolbox.population(n=30)
-    population, logbook = algorithms.eaSimple(pop, toolbox,
-                                              cxpb=0.5, mutpb=0.2,
-                                              ngen=15,
-                                              stats=stats,
-                                              halloffame=hof,
-                                              verbose=False)
+    # GA laufen lassen
+    pop, logbook = algorithms.eaSimple(
+        pop, toolbox,
+        cxpb=0.5, mutpb=0.2,
+        ngen=15,
+        stats=stats,
+        halloffame=hof,
+        verbose=False
+    )
 
-    # Post‐Selection: innerhalb ±1% Sharpe die mit wenigsten Trades wählen
-    best_sh = max(ind.fitness.values[0] for ind in population)
+    # --- Post-Selection: Sharpe ≥99% & min Trades ---
+    best_sh = hof[0].fitness.values[0]
     eps = 0.01 * best_sh
-    candidates = [ind for ind in population if ind.fitness.values[0] >= best_sh - eps]
-    best_ind = min(candidates, key=lambda ind: evaluate_sharpe_count(ind)[1])
+    cands = [ind for ind in pop if ind.fitness.values[0] >= best_sh - eps]
+    best_ind = min(cands, key=lambda ind: evaluate_sharpe_count(ind)[1])
 
-    # finale Fenster
-    bs, bl = int(round(best_ind[0])), int(round(best_ind[1]))
+    bs, bl = map(int, best_ind)
     if bs >= bl:
-        bs, bl = bl - 1, bs + 1
+        bs, bl = bl-1, bs+1
 
-    # finaler Backtest
-    data_vis = data.copy()
-    data_vis['MA_s'] = data_vis['Close'].rolling(bs).mean()
-    data_vis['MA_l'] = data_vis['Close'].rolling(bl).mean()
-    df = data_vis.dropna()
+    # --- Finaler Backtest mit (bs, bl) ---
+    df_bt = pd.DataFrame({'Close': prices})
+    df_bt['MA_s'] = df_bt['Close'].rolling(bs).mean()
+    df_bt['MA_l'] = df_bt['Close'].rolling(bl).mean()
+    df_bt.dropna(inplace=True)
 
-    trades = []
-    pos = 0
+    position = 0
     entry_price = 0.0
-    wealth = start_capital
+    capital = start_capital
     cum_pnl = 0.0
-    positionswert = 0.0
+    trades = []
     wealth_hist = []
     pos_hist = []
 
-    for i in range(len(df)):
-        price = df['Close'].iat[i]
-        date_i = df.index[i]
+    for i in range(len(df_bt)):
+        price = df_bt['Close'].iat[i]
+        date_i = df_bt.index[i]
         # Equity
-        if pos == 1:
-            units = positionswert / entry_price
-            equity_val = units * price
-        elif pos == -1:
-            units = positionswert / entry_price
-            equity_val = positionswert + (entry_price - price) * units
+        if position == 1:
+            equity = capital * price / entry_price
+        elif position == -1:
+            equity = capital * (2 - price/entry_price)
         else:
-            equity_val = wealth
-        wealth_hist.append(equity_val)
-        pos_hist.append(pos)
+            equity = capital
+        wealth_hist.append(equity)
+        pos_hist.append(position)
 
-        ms_t, ml_t = df['MA_s'].iat[i], df['MA_l'].iat[i]
-        ms_y = df['MA_s'].iat[i-1] if i>0 else 0
-        ml_y = df['MA_l'].iat[i-1] if i>0 else 0
+        ms_t = df_bt['MA_s'].iat[i]
+        ml_t = df_bt['MA_l'].iat[i]
+        ms_y = df_bt['MA_s'].iat[i-1] if i>0 else ms_t
+        ml_y = df_bt['MA_l'].iat[i-1] if i>0 else ml_t
 
-        # Kauf
-        if ms_t > ml_t and ms_y <= ml_y and pos == 0:
+        # Entry Long
+        if ms_t > ml_t and ms_y <= ml_y and position==0:
+            position = 1
             entry_price = price
-            pos = 1
-            positionswert = wealth
-            wealth -= positionswert
-            trades.append({'Typ':'Kauf','Datum':date_i,'Kurs':price,
-                           'Spesen':0,'Positionswert':positionswert,
-                           'Profit/Loss':None,'Kumulative P&L':cum_pnl})
-        # Verkauf Long
-        if ms_t < ml_t and ms_y >= ml_y and pos == 1:
-            pos = 0
-            gross = (price - entry_price)/entry_price * positionswert
-            cum_pnl += gross
-            wealth += positionswert + gross
-            trades.append({'Typ':'Verkauf','Datum':date_i,'Kurs':price,
-                           'Spesen':0,'Positionswert':None,
-                           'Profit/Loss':gross,'Kumulative P&L':cum_pnl})
-        # Short
-        if ms_t < ml_t and ms_y >= ml_y and pos == 0:
+            trades.append({'Typ':'Entry Long','Datum':date_i,'Preis':price})
+        # Exit Long
+        if ms_t < ml_t and ms_y >= ml_y and position==1:
+            pnl = (price - entry_price)/entry_price * capital
+            cum_pnl += pnl
+            capital += pnl
+            position = 0
+            trades.append({'Typ':'Exit Long','Datum':date_i,'Preis':price,'P&L':pnl})
+        # Entry Short
+        if ms_t < ml_t and ms_y >= ml_y and position==0:
+            position = -1
             entry_price = price
-            pos = -1
-            positionswert = wealth
-            wealth -= positionswert
-            trades.append({'Typ':'Short','Datum':date_i,'Kurs':price,
-                           'Spesen':0,'Positionswert':positionswert,
-                           'Profit/Loss':None,'Kumulative P&L':cum_pnl})
-        # Short‐Cover → Long
-        if ms_t > ml_t and ms_y <= ml_y and pos == -1:
-            gross = (entry_price - price)/entry_price * positionswert
-            cum_pnl += gross
-            wealth += positionswert + gross
-            trades.append({'Typ':'Cover','Datum':date_i,'Kurs':price,
-                           'Spesen':0,'Positionswert':None,
-                           'Profit/Loss':gross,'Kumulative P&L':cum_pnl})
-            entry_price = price
-            pos = 1
-            positionswert = wealth
-            wealth -= positionswert
-            trades.append({'Typ':'Kauf','Datum':date_i,'Kurs':price,
-                           'Spesen':0,'Positionswert':positionswert,
-                           'Profit/Loss':None,'Kumulative P&L':cum_pnl})
+            trades.append({'Typ':'Entry Short','Datum':date_i,'Preis':price})
+        # Exit Short
+        if ms_t > ml_t and ms_y <= ml_y and position==-1:
+            pnl = (entry_price - price)/entry_price * capital
+            cum_pnl += pnl
+            capital += pnl
+            position = 0
+            trades.append({'Typ':'Exit Short','Datum':date_i,'Preis':price,'P&L':pnl})
 
-    # offene Position schließen
-    if pos != 0:
-        last_p = df['Close'].iat[-1]
-        last_d = df.index[-1]
-        if pos == 1:
-            gross = (last_p - entry_price)/entry_price * positionswert
-        else:
-            gross = (entry_price - last_p)/entry_price * positionswert
-        cum_pnl += gross
-        wealth += positionswert + gross
-        wealth_hist[-1] = wealth
-        trades.append({'Typ':'Schließen','Datum':last_d,'Kurs':last_p,
-                       'Spesen':0,'Positionswert':None,
-                       'Profit/Loss':gross,'Kumulative P&L':cum_pnl})
+    # letzte Position schließen
+    if position != 0:
+        price = df_bt['Close'].iat[-1]
+        pnl = ((entry_price - price)/entry_price if position==-1 else (price - entry_price)/entry_price) * capital
+        capital += pnl
+        cum_pnl += pnl
+        trades.append({'Typ':'Final Exit','Datum':df_bt.index[-1],'Preis':price,'P&L':pnl})
+        wealth_hist[-1] = capital
 
     trades_df = pd.DataFrame(trades)
-    strat_ret = (wealth - start_capital)/start_capital * 100
-    bh_ret = (data_vis['Close'].iat[-1] - data_vis['Close'].iat[0]) / data_vis['Close'].iat[0] * 100
+    strat_ret = (capital - start_capital) / start_capital * 100
+    bh_ret    = (prices.iloc[-1]/prices.iloc[0] - 1) * 100
 
-    df_plot = pd.DataFrame({'Close': df['Close'], 'Position': pos_hist}, index=df.index)
-    df_wealth = pd.DataFrame({'Datum': df.index, 'Wealth': wealth_hist})
+    df_plot   = pd.DataFrame({'Close':df_bt['Close'],'Position':pos_hist}, index=df_bt.index)
+    df_wealth = pd.DataFrame({'Datum':df_bt.index,'Wealth':wealth_hist})
 
     return {
-        "trades_df": trades_df,
-        "strategy_return": float(strat_ret),
-        "buy_and_hold_return": float(bh_ret),
-        "total_trades": len(trades_df),
-        "long_trades": trades_df['Typ'].str.contains("Kauf").sum(),
-        "short_trades": trades_df['Typ'].str.contains("Short").sum(),
-        "pos_count": (trades_df['Profit/Loss']>0).sum(),
-        "neg_count": (trades_df['Profit/Loss']<0).sum(),
-        "pos_pct": None,
-        "neg_pct": None,
-        "pos_pnl": trades_df.loc[trades_df['Profit/Loss']>0,'Profit/Loss'].sum(),
-        "neg_pnl": trades_df.loc[trades_df['Profit/Loss']<0,'Profit/Loss'].sum(),
-        "total_pnl": trades_df['Profit/Loss'].dropna().sum(),
-        "pos_perf": None,
-        "neg_perf": None,
-        "df_plot": df_plot,
-        "df_wealth": df_wealth,
         "best_individual": (bs, bl),
-        "logbook": logbook
+        "logbook": logbook,
+        "trades_df": trades_df,
+        "strategy_return": strat_ret,
+        "buy_and_hold_return": bh_ret,
+        "df_plot": df_plot,
+        "df_wealth": df_wealth
     }
 
 
 # ---------------------------------------
-# 2) Streamlit‐App UI
+# 2) Streamlit-UI
 # ---------------------------------------
-st.title("✨ AI Quant Model")
+st.title("✨ MA-Crossover GA-Optimierung")
 
 st.markdown("""
-Gib einen **Aktien-Ticker**, ein **Startdatum** und das **Startkapital** ein.
-Das Modell optimiert per GA ein MA-Crossover-System auf risikoadjustierte Performance (Sharpe)
-und wählt unter nahezu gleich guten Lösungen (±1 % Sharpe) das mit den wenigsten Trades.
+Wähle einen Ticker, ein Startdatum und das Startkapital.  
+Der GA sucht die MA-Fenster mit maximaler Sharpe-Ratio und danach minimaler Trade-Anzahl.
 """)
 
-ticker = st.text_input("Ticker (z.B. AAPL):", value="AAPL")
-start_dt = st.date_input("Startdatum:", value=date(2020,1,1), max_value=date.today())
-cap = st.number_input("Startkapital (€):", min_value=1000.0, value=10000.0, step=500.0, format="%.2f")
+ticker = st.text_input("Ticker (z.B. AAPL):", "AAPL").strip().upper()
+start_dt = st.date_input("Startdatum:", date(2022,1,1), max_value=date.today())
+capital  = st.number_input("Startkapital (€):", min_value=1000.0, value=10000.0, step=500.0)
 
-if st.button("🔄 Starte Optimierung"):
-    if not ticker.strip():
-        st.error("Bitte gib einen gültigen Ticker ein.")
+if st.button("🔄 Optimierung starten"):
+    with st.spinner("Optimiere…"):
+        try:
+            res = optimize_and_run(ticker, start_dt.strftime("%Y-%m-%d"), capital)
+        except Exception as e:
+            st.error(f"Fehler: {e}")
+            st.stop()
+
+    # 0️⃣ Optimierungsergebnisse
+    bs, bl = res["best_individual"]
+    st.subheader("0. Optimierungsergebnisse")
+    st.markdown(f"- **Short MA:** {bs} Tage  \n- **Long MA:** {bl} Tage")
+    sharpe_gen = res["logbook"].select("max")
+    df_log = pd.DataFrame({"Max Sharpe": sharpe_gen})
+    st.line_chart(df_log, use_container_width=True)
+
+    # 1️⃣ Performance vs. Buy & Hold
+    strat_ret = res["strategy_return"]
+    bh_ret    = res["buy_and_hold_return"]
+    st.subheader("1. Performance-Vergleich")
+    fig1, ax1 = plt.subplots()
+    bars = ax1.bar(["Strategie","Buy & Hold"], [strat_ret, bh_ret],
+                   color=["#2ca02c","#555555"], alpha=0.7)
+    for bar in bars:
+        h = bar.get_height()
+        ax1.text(bar.get_x()+bar.get_width()/2, h, f"{h:.2f}%", ha='center', va='bottom')
+    ax1.set_ylabel("Rendite (%)"); ax1.grid(axis="y", linestyle="--", alpha=0.4)
+    st.pyplot(fig1)
+
+    # 2️⃣ Equity-Kurve mit Phasen
+    st.subheader("2. Equity-Kurve & Phasen")
+    df_plot   = res["df_plot"]
+    df_wealth = res["df_wealth"]
+    fig2, ax2 = plt.subplots(figsize=(10,5))
+    ax_w = ax2.twinx()
+    ax2.plot(df_plot.index, df_plot["Close"], label="Preis", color="black")
+    ax_w.plot(df_wealth["Datum"], df_wealth["Wealth"],
+             label="Wealth", color="green")
+    # Phasen-Overlay
+    pos = df_plot["Position"].values
+    dates = df_plot.index
+    cur, start = pos[0], dates[0]
+    for i in range(1,len(pos)):
+        if pos[i] != cur:
+            end = dates[i-1]
+            col = "green" if cur==1 else "red"
+            ax2.axvspan(start, end, color=col, alpha=0.2)
+            cur, start = pos[i], dates[i]
+    # letzte Phase
+    col = "green" if cur==1 else "red"
+    ax2.axvspan(start, dates[-1], color=col, alpha=0.2)
+    ax2.set_xlabel("Datum"); ax2.set_ylabel("Preis")
+    ax_w.set_ylabel("Wealth (€)")
+    l1,l2 = ax2.get_legend_handles_labels()
+    l3,l4 = ax_w.get_legend_handles_labels()
+    ax2.legend(l1+l3, l2+l4, loc="upper left")
+    st.pyplot(fig2)
+
+    # 3️⃣ Trade-Tabelle
+    st.subheader("3. Trades")
+    td = res["trades_df"]
+    if td.empty:
+        st.write("Keine Trades ausgeführt.")
     else:
-        with st.spinner("Optimiere..."):
-            results = optimize_and_run(ticker.strip().upper(),
-                                       start_dt.strftime("%Y-%m-%d"),
-                                       float(cap))
-
-        # 0. Optimierungsresultate
-        bs, bl = results["best_individual"]
-        st.subheader("0️⃣ Optimierungsergebnisse")
-        st.markdown(f"- **Bestes Short MA-Fenster:** {bs} Tage")
-        st.markdown(f"- **Bestes Long MA-Fenster:**  {bl} Tage")
-        log = results["logbook"].select("max")
-        df_log = pd.DataFrame({"Generation": range(len(log)), "Max Sharpe": log}).set_index("Generation")
-        st.line_chart(df_log, use_container_width=True)
-
-        # 1. Performance‐Vergleich
-        st.subheader("1️⃣ Strategie vs. Buy & Hold")
-        strat_ret, bh_ret = results["strategy_return"], results["buy_and_hold_return"]
-        fig1, ax1 = plt.subplots()
-        bars = ax1.bar(["Strategie","Buy & Hold"], [strat_ret, bh_ret], color=["#2ca02c","#777777"])
-        for bar in bars:
-            ax1.text(bar.get_x()+bar.get_width()/2, bar.get_height(),
-                     f"{bar.get_height():.2f}%", ha="center", va="bottom")
-        ax1.set_ylabel("Rendite (%)"); ax1.grid(axis="y", linestyle="--", alpha=0.5)
-        st.pyplot(fig1)
-
-        # 2. Kurs + Phasen
-        st.subheader("2️⃣ Kursdiagramm mit Phasen")
-        dfp = results["df_plot"]
-        fig2, ax2 = plt.subplots(figsize=(10,4))
-        ax2.plot(dfp.index, dfp["Close"], color="black", lw=1)
-        phases = dfp["Position"].values; dates = dfp.index
-        curr, start = phases[0], dates[0]
-        for i in range(1,len(dates)):
-            if phases[i]!=curr:
-                end = dates[i-1]
-                col = "green" if curr==1 else "red" if curr==-1 else None
-                if col: ax2.axvspan(start,end,color=col,alpha=0.2)
-                curr, start = phases[i], dates[i]
-        col = "green" if curr==1 else "red" if curr==-1 else None
-        if col: ax2.axvspan(start,dates[-1],color=col,alpha=0.2)
-        ax2.set_xlabel("Datum"); ax2.set_ylabel("Preis"); ax2.grid(True,linestyle="--",alpha=0.4)
-        st.pyplot(fig2)
-
-        # 3. Trade‐Tabelle
-        st.subheader("3️⃣ Trade‐Details")
-        trades_df = results["trades_df"]
-        if trades_df.empty:
-            st.write("Keine Trades ausgeführt.")
-        else:
-            tbl = trades_df.copy()
-            tbl['Datum'] = tbl['Datum'].dt.strftime("%Y-%m-%d")
-            st.dataframe(tbl, use_container_width=True)
-
-        # 4. Handels‐Statistiken
-        st.subheader("4️⃣ Handelsstatistiken")
-        total, lt, st_ = results["total_trades"], results["long_trades"], results["short_trades"]
-        pc, nc = results["pos_count"], results["neg_count"]
-        pos_pct = results["pos_pct"] or (pc/(pc+nc)*100 if pc+nc>0 else 0)
-        neg_pct = results["neg_pct"] or (nc/(pc+nc)*100 if pc+nc>0 else 0)
-        ppnl, npnl, tpnL = results["pos_pnl"], results["neg_pnl"], results["total_pnl"]
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Einträge gesamt", total)
-            st.metric("Long‐Einträge", lt)
-            st.metric("Short‐Einträge", st_)
-        with col2:
-            st.metric("Positive Trades", pc)
-            st.metric("Negative Trades", nc)
-            st.metric("Positive (%)", f"{pos_pct:.2f}%")
-        with col3:
-            st.metric("Gesamt‐P&L", f"{tpnL:.2f} EUR")
-            st.metric("P&L positiv", f"{ppnl:.2f} EUR")
-            st.metric("P&L negativ", f"{npnl:.2f} EUR")
-
-        # 5. Anzahl Trades (Balken)
-        st.subheader("5️⃣ Anzahl der Trades")
-        fig5, ax5 = plt.subplots()
-        ax5.bar(["Gesamt","Long","Short"], [total, lt, st_], color=["#4c72b0","#55a868","#c44e52"], alpha=0.8)
-        ax5.set_ylabel("Anzahl"); ax5.grid(axis="y",linestyle="--",alpha=0.5)
-        st.pyplot(fig5)
-
-        # 6. Equity‐Kurve
-        st.subheader("6️⃣ Equity‐Kurve")
-        dfw = results["df_wealth"]
-        fig6, ax6 = plt.subplots(figsize=(10,4))
-        ax6.plot(dfw["Datum"], dfw["Wealth"], label="Strategie", color="#2ca02c", lw=1.3)
-        ax6.set_xlabel("Datum"); ax6.set_ylabel("Vermögen (€)"); ax6.grid(True,linestyle="--",alpha=0.4)
-        st.pyplot(fig6)
-
-        # 7. Normalized Price vs. Wealth
-        st.subheader("7️⃣ Normiertes Chart")
-        dfw2 = dfw.set_index("Datum").reindex(dfp.index, method="ffill")
-        price0, wealth0 = dfp["Close"].iloc[0], dfw2["Wealth"].iloc[0]
-        dfp["PriceNorm"] = dfp["Close"]/price0
-        dfw2["WealthNorm"] = dfw2["Wealth"]/wealth0
-        fig7, ax7 = plt.subplots(figsize=(10,4))
-        ax7.plot(dfp.index, dfp["PriceNorm"], label="Preis normiert", lw=1, alpha=0.5)
-        ax7.plot(dfw2.index, dfw2["WealthNorm"], label="Wealth normiert", lw=1.5, alpha=0.8)
-        curr, start = phases[0], dates[0]
-        for i in range(1,len(dates)):
-            if phases[i]!=curr:
-                end = dates[i-1]
-                col = "green" if curr==1 else "red" if curr==-1 else None
-                if col: ax7.axvspan(start,end,color=col,alpha=0.1)
-                curr, start = phases[i], dates[i]
-        col = "green" if curr==1 else "red" if curr==-1 else None
-        if col: ax7.axvspan(start,dates[-1],color=col,alpha=0.1)
-        ax7.set_xlabel("Datum"); ax7.set_ylabel("Normierter Wert")
-        ax7.legend(); ax7.grid(True,linestyle="--",alpha=0.4)
-        st.pyplot(fig7)
+        # Datum schön formatieren
+        if pd.api.types.is_datetime64_any_dtype(td["Datum"]):
+            td["Datum"] = td["Datum"].dt.strftime("%Y-%m-%d")
+        st.dataframe(td, use_container_width=True)
