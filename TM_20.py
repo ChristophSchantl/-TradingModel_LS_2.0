@@ -27,6 +27,13 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
     data['Log_Returns'] = np.log(data['Close'] / data['Close'].shift(1))
     data.dropna(inplace=True)
 
+
+    # 1. Fitness mit zwei Zielen: +Sharpe, –#Trades
+    creator.create("FitnessMulti", base.Fitness, weights=(1.0, -1.0))
+    creator.create("Individual", list, fitness=creator.FitnessMulti)
+
+
+    
     # 2. Fitness-Funktion für den GA
     def evaluate_strategy(individual):
         ma_short_window, ma_long_window = int(individual[0]), int(individual[1])
@@ -77,8 +84,20 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         if returns.std() == 0:
             return -np.inf,
         sharpe = (returns.mean() - (0.02 / 252)) / returns.std() * np.sqrt(252)
-        return sharpe,
+        trade_count = len(trades)  # oder zähle Entry-Signale
+    
+        # Penalty-Parameter: lambda_trade steuert den Kompromiss
+        lambda_trade = 0.02        # z.B. 0.02 Sharpe-Punkte pro Trade
+        fitness = sharpe - lambda_trade * trade_count
+        return (fitness,)
 
+
+
+
+
+
+
+    
     # 3. DEAP-Setup für GA
     if "FitnessMax" not in creator.__dict__:
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
@@ -120,12 +139,29 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         verbose=False
     )
 
-    # 3.3 Bestes Individuum
-    best = hof[0]
+    # 1) Ermittele die beste Sharpe in der finalen Population
+    best_sharpe = max(ind.fitness.values[0] for ind in population)
 
+    # 2) Definiere Toleranz (z.B. 1 % der besten Sharpe)
+    epsilon = 0.01 * best_sharpe
 
+    # 3) Filtere alle Individuen, die innerhalb dieser Toleranz liegen
+    candidates = [
+        ind for ind in population
+        if ind.fitness.values[0] >= best_sharpe - epsilon
+    ]
 
+    # 4) Simuliere für jedes dieser Kandidaten kurz die Trade-Anzahl
+    #    (Dafür kannst Du z.B. Deine evaluate_strategy leicht anpassen,
+    #     oder eine kleine Hilfsfunktion schreiben, die nur die
+    #     Trades zählt, ohne den Sharpe neu zu berechnen.)
+    
+    def simulate_trade_count(individual):
+        _, trade_count = evaluate_strategy_with_count(individual)
+        return trade_count
 
+    # 5) Wähle das Individuum mit der minimalen Trade-Anzahl
+    best = min(candidates, key=simulate_trade_count)
     
 
     # 4. Gerundete MA-Werte
