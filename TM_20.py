@@ -341,39 +341,6 @@ def main():
 
 
 
-
-# Beschreibung der App
-if not run_button:
-    st.markdown("### ℹ️ Beschreibung dieses AI Quant Modells")
-    st.markdown("""
-    Das folgende **AI-gestützte Quant Long/Short-Modell** analysiert historische Marktdaten, identifiziert optimale Handelssignale und führt einen detaillierten Backtest durch.  
-    Nutzer können dafür einen beliebigen Aktien-, Fonds- oder Asset-Ticker (über Yahoo Finance) eingeben, den gewünschten Startzeitpunkt für die Analyse wählen und das Startkapital für den Backtest definieren.
-    
-    **Das Modell liefert folgende Auswertungen:**
-    
-    - 📊 **Performance-Vergleich**: Die modellbasierte Handelsstrategie wird der klassischen Buy-and-Hold-Strategie gegenübergestellt.
-    
-    - 🧭 **Kursdiagramm mit Signalmarkierungen**: Visualisiert werden Kauf- und Verkaufsphasen der Handelsstrategie über den Zeitverlauf hinweg.
-    
-    - 📈 **Trade-Tabelle**: Alle ausgeführten Transaktionen des Modells werden übersichtlich dargestellt – inklusive Zeitpunkten, Einstiegspreisen, Ergebnis (Gewinn/Verlust) und kumuliertem P&L.
-    
-    - 📋 **Handelsstatistik**: Detaillierte Kennzahlen zur Strategie werden bereitgestellt, darunter Anzahl aller Trades, Gewinn-/Verlustquote, durchschnittlicher Trade-Ertrag sowie Gesamt-P&L.
-    
-    - 📊 **Trade-Typ-Analyse**: Ein Balkendiagramm zeigt die Anzahl der Long- und Short-Positionen im Backtestzeitraum.
-    
-    - 🧩 **Performance-Visualisierung**: In einem kombinierten Chart werden Preisentwicklung und Vermögensverlauf abgebildet – inklusive Handelsphasen sowie einer Gegenüberstellung von normalisiertem Preisverlauf und Wealth Index.
-    """)
-
-
-
-
-
-
-
-
-
-
-
 # nur wenn der Button gedrückt wurde und ein Ticker eingegeben ist:
 if run_button:
     if ticker_input.strip() == "":
