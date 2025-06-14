@@ -36,7 +36,7 @@ def yahoo_search_suggestions(query: str, count: int = 6) -> list[tuple[str, str]
 warnings.filterwarnings("ignore")
 
 # -----------------------------------------------------------------------------
-# Funktion für GA-Optimierung & Backtest (DEIN ORIGINAL)
+# Funktion für GA-Optimierung & Backtest (KORRIGIERTE VERSION)
 # -----------------------------------------------------------------------------
 def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
     end_date_str = datetime.now().strftime('%Y-%m-%d')
@@ -136,6 +136,7 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
     position = 0
     initial_price = None
     wealth = start_capital
+    positionswert = 0  # Initialisierung hinzugefügt
     cumulative_pnl = 0
     trades = []
     wealth_history = []
@@ -294,7 +295,6 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         "best_individual": best,
         "logbook": logbook
     }
-    pass
 
 # -----------------------------------------------------------------------------
 # Streamlit-UI
