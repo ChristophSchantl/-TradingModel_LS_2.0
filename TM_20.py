@@ -713,3 +713,7 @@ def main():
         
         fig_single.autofmt_xdate(rotation=0)
         st.pyplot(fig_single)
+
+
+if __name__ == "__main__":
+    main()
