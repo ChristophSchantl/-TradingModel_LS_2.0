@@ -399,36 +399,14 @@ Bitte wähle unten den Ticker (Yahoo Finance) , den Beginn des Zeitraums und das
 ticker_input = ""
 if len(search_text) > 1:
     suggestions = yahoo_search_suggestions(search_text)
-    display_list = [f"{sym}  –  {name}" for sym, name in suggestions]
-    choice = st.selectbox("Gefundene Symbole", [""] + display_list)
-    if choice:
-        symbol = choice.split("  –  ")[0]
-        if st.button("✓ Ticker übernehmen"):
-            ticker_input = symbol
-            st.success(f"Ticker gesetzt: **{symbol}**")
-            # Optional: search_text = ""  # reset search_text
-else:
-    st.info("Gib mindestens 2 Zeichen ein, um Vorschläge zu sehen.")
-
-# Fallback, falls Nutzer doch manuell eintippen möchte
+    options = [f"{sym} – {name}" for sym,name in suggestions]
+    choice = st.selectbox("Gefundene Symbole", [""] + options)
+    if choice and st.button("✓ Übernehmen"):
+        ticker_input = choice.split(" – ")[0]
+        st.success(f"Ticker gesetzt: {ticker_input}")
+# Fallback manuell
 if not ticker_input:
-    ticker_input = st.text_input(
-        label="ODER: Manuelle Eingabe",
-        placeholder="z.B. AAPL",
-        help="Direkt das Symbol eingeben, z.B. GOOG, TSLA."
-    )
-
-
-
-# ------------------------------
-# Eingabefelder für Ticker / Zeitfenster / Startkapital
-# ------------------------------
-ticker_input = st.text_input(
-    label="1️⃣ Welchen Aktien-Ticker möchtest du analysieren?",
-    value="",  # leerer Standardwert
-    help='Gib hier das Tickersymbol ein, z.B. "AAPL", "BABA"',
-    placeholder="z.B. AAPL, BABA, BZ=F"
-)
+    ticker_input = st.text_input("ODER manuell eingeben", placeholder="z.B. GOOG")
 
 start_date_input = st.date_input(
     label="2️⃣ Beginn des Analyse-Zeitraums",
