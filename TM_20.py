@@ -10,15 +10,10 @@ import warnings
 import requests
 
 # -----------------------------------------------------------------------------
-# Yahoo-Autocomplete
+# Yahoo-Autocomplete mit Fehlerhandling
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def yahoo_search_suggestions(query: str, count: int = 6) -> list[tuple[str, str]]:
-    """
-    Fragt Yahoo Finance nach Symbol-Vorschlägen.
-    Gibt eine Liste von (symbol, name)-Tupeln zurück.
-    Bei Netzwerk- oder JSON-Fehlern wird [] zurückgegeben.
-    """
     if not query:
         return []
     url = (
@@ -27,15 +22,12 @@ def yahoo_search_suggestions(query: str, count: int = 6) -> list[tuple[str, str]
     )
     try:
         resp = requests.get(url, timeout=5)
-        resp.raise_for_status()  # HTTP-Fehler (4xx,5xx) als Exception
-        payload = resp.json()
+        resp.raise_for_status()
+        data = resp.json().get("quotes", [])
     except (requests.exceptions.RequestException, ValueError):
-        # z.B. Timeout, ConnectionError, JSONDecodeError
         return []
-
-    quotes = payload.get("quotes", [])
     results = []
-    for item in quotes:
+    for item in data:
         sym  = item.get("symbol", "")
         name = item.get("shortname") or item.get("longname") or ""
         results.append((sym, name))
@@ -302,7 +294,7 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         "best_individual": best,
         "logbook": logbook
     }
-
+    pass
 
 # -----------------------------------------------------------------------------
 # Streamlit-UI
@@ -313,24 +305,31 @@ def main():
         "Bitte wähle unten den Ticker (Yahoo Finance), den Beginn des Zeitraums und das Startkapital aus."
     )
 
-    # 1️⃣ Autocomplete-Eingabe
+    # 1️⃣ Suchfeld
     search_text = st.text_input(
         "Ticker suchen (Autocomplete)",
         placeholder="z.B. AAPL, MSFT, GOOG"
     )
 
-    options = []
+    # falls der Nutzer mindestens 2 Zeichen eingibt, holen wir Vorschläge
+    options: list[str] = []
     if len(search_text) > 1:
         suggestions = yahoo_search_suggestions(search_text)
-        options = [sym for sym, _ in suggestions]
+        options = [f"{sym} – {name}" for sym, name in suggestions]
 
+    # 2️⃣ Selectbox mit Vorschlägen
     ticker_select = st.selectbox("Gefundene Symbole", [""] + options)
+
+    # 3️⃣ Manueller Fallback
     ticker_manual = st.text_input("ODER manuell eingeben", placeholder="z.B. GOOG")
 
-    # kombiniert: wenn selectbox leer, dann manuelle Eingabe
-    ticker_input = ticker_select or ticker_manual
+    # ticker_input: erst Selectbox (vor dem " – "), sonst manuell
+    if ticker_select:
+        ticker_input = ticker_select.split(" – ")[0]
+    else:
+        ticker_input = ticker_manual.strip()
 
-    # 2️⃣ Datum & Kapital
+    # 4️⃣ Datum & Kapital
     start_date_input = st.date_input(
         "Beginn des Analyse-Zeitraums",
         value=date(2024, 1, 1),
@@ -345,10 +344,13 @@ def main():
     )
 
     st.markdown("---")
+
+    # 5️⃣ Run-Button
     run_button = st.button("🔄 Ergebnisse berechnen")
 
+    # erst hier führen wir den Backtest aus
     if run_button:
-        if not ticker_input.strip():
+        if not ticker_input:
             st.error("Bitte gib zunächst einen gültigen Ticker ein, z. B. 'AAPL' oder 'MSFT'.")
             return
 
@@ -359,7 +361,6 @@ def main():
                 start_date=start_date_str,
                 start_capital=float(start_capital_input)
             )
-
         # Ergebnisse entpacken
         trades_df           = results["trades_df"]
         strategy_return     = results["strategy_return"]
