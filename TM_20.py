@@ -7,44 +7,27 @@ from datetime import datetime, date
 from deap import base, creator, tools, algorithms
 import random
 import warnings
-import requests
-
-# -----------------------------------------------------------------------------
-# Yahoo-Autocomplete mit Fehlerhandling
-# -----------------------------------------------------------------------------
-@st.cache_data(ttl=3600)
-def yahoo_search_suggestions(query: str, count: int = 6) -> list[tuple[str, str]]:
-    if not query:
-        return []
-    url = (
-        "https://query1.finance.yahoo.com/v1/finance/search"
-        f"?q={query}&quotesCount={count}&newsCount=0"
-    )
-    try:
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json().get("quotes", [])
-    except (requests.exceptions.RequestException, ValueError):
-        return []
-    results = []
-    for item in data:
-        sym  = item.get("symbol", "")
-        name = item.get("shortname") or item.get("longname") or ""
-        results.append((sym, name))
-    return results
 
 warnings.filterwarnings("ignore")
+# ---------------------------------------
+# Funktion, die im Hintergrund Optimierung und Trading ausführt
+# ---------------------------------------
 
-# -----------------------------------------------------------------------------
-# Funktion für GA-Optimierung & Backtest (KORRIGIERTE VERSION)
-# -----------------------------------------------------------------------------
+# @st.cache_data(show_spinner=False)      #wenn man die Speicherfunktion haben möchte --> dann diese Zeile aktivieren
 def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
+    """
+    Lädt Kursdaten für den gegebenen Ticker und Start-Datum (bis heute),
+    führt die MA-Optimierung per GA durch, rundet die MA-Fenster, simuliert das Trading
+    und gibt alle relevanten Ergebnisse zurück. Der Startbetrag wird durch start_capital festgelegt.
+    """
+    # 1. Datenbeschaffung und -aufbereitung
     end_date_str = datetime.now().strftime('%Y-%m-%d')
-    data = yf.download(ticker, start=start_date_str, end=end_date_str, progress=False)
+    data = yf.download(ticker, start=start_date_str, end=end_date_str)
     data['Close'] = data['Close'].interpolate(method='linear')
     data['Log_Returns'] = np.log(data['Close'] / data['Close'].shift(1))
     data.dropna(inplace=True)
 
+    # 2. Fitness-Funktion für den GA
     def evaluate_strategy(individual):
         ma_short_window, ma_long_window = int(individual[0]), int(individual[1])
         if ma_short_window >= ma_long_window or ma_short_window <= 0 or ma_long_window <= 0:
@@ -55,7 +38,6 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         df.dropna(inplace=True)
 
         position = 0
-        trade_price = 0
         wealth_line = [start_capital]
         cumulative_pnl = 0
 
@@ -66,6 +48,7 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
             ma_s_y = float(df['MA_short'].iloc[i - 1])
             ma_l_y = float(df['MA_long'].iloc[i - 1])
 
+            # Long-Strategie
             if ma_s_t > ma_l_t and ma_s_y <= ma_l_y:
                 if position == -1:
                     pnl = (trade_price - price_today) / trade_price * wealth_line[-1]
@@ -75,6 +58,7 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
                     position = 1
                     trade_price = price_today
 
+            # Short-Strategie
             elif ma_s_t < ma_l_t and ma_s_y >= ma_l_y:
                 if position == 1:
                     pnl = (price_today - trade_price) / trade_price * wealth_line[-1]
@@ -84,6 +68,7 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
                     position = -1
                     trade_price = price_today
 
+            # Position halten
             else:
                 wealth_line.append(wealth_line[-1])
 
@@ -94,6 +79,7 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         sharpe = (returns.mean() - (0.02 / 252)) / returns.std() * np.sqrt(252)
         return sharpe,
 
+    # 3. DEAP-Setup für GA
     if "FitnessMax" not in creator.__dict__:
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
     if "Individual" not in creator.__dict__:
@@ -101,73 +87,101 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
 
     toolbox = base.Toolbox()
     toolbox.register("attr_int", random.randint, 5, 50)
-    toolbox.register("individual", tools.initCycle, creator.Individual,
-                     (toolbox.attr_int, toolbox.attr_int), n=1)
+    toolbox.register(
+        "individual",
+        tools.initCycle,
+        creator.Individual,
+        (toolbox.attr_int, toolbox.attr_int),
+        n=1
+    )
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("evaluate", evaluate_strategy)
     toolbox.register("mate", tools.cxBlend, alpha=0.5)
     toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=5, indpb=0.2)
     toolbox.register("select", tools.selTournament, tournsize=3)
 
+    # 3.1 Statistiken und Hall of Fame
     stats = tools.Statistics(lambda ind: ind.fitness.values)
     stats.register("min", np.min)
     stats.register("avg", np.mean)
     stats.register("max", np.max)
     hof = tools.HallOfFame(1)
 
+    # 3.2 GA laufen lassen (zeichnet logbook und hof auf)
     population = toolbox.population(n=20)
     population, logbook = algorithms.eaSimple(
-        population, toolbox, cxpb=0.5, mutpb=0.2, ngen=10,
-        stats=stats, halloffame=hof, verbose=False
+        population,
+        toolbox,
+        cxpb=0.5,
+        mutpb=0.2,
+        ngen=10,
+        stats=stats,
+        halloffame=hof,
+        verbose=False
     )
+
+    # 3.3 Bestes Individuum
     best = hof[0]
 
-    # Runde die Fenster
+
+
+
+    
+
+    # 4. Gerundete MA-Werte
     best_short = int(round(best[0]))
     best_long = int(round(best[1]))
     if best_short >= best_long:
-        best_short, best_long = min(best_short, best_long-1), max(best_short+1, best_long)
+        best_short, best_long = min(best_short, best_long - 1), max(best_short + 1, best_long)
 
+    # 5. Handelsmodell mit den gerundeten MA-Werten
     data_vis = data.copy()
     data_vis['MA_short'] = data_vis['Close'].rolling(window=best_short).mean()
-    data_vis['MA_long']  = data_vis['Close'].rolling(window=best_long).mean()
+    data_vis['MA_long'] = data_vis['Close'].rolling(window=best_long).mean()
     data_vis.dropna(inplace=True)
 
     position = 0
     initial_price = None
     wealth = start_capital
-    positionswert = 0  # Initialisierung hinzugefügt
     cumulative_pnl = 0
     trades = []
-    wealth_history = []
-    position_history = []
+    positionswert = 0
+
+    # <<< HIER: Listen für Equity und Position initialisieren
+    wealth_history = []         # Wealth pro Tag (Cash + offener Positionswert)
+    position_history = []       # Positionsverlauf (1=Long, -1=Short, 0=Neutral)
 
     for i in range(len(data_vis)):
         price_today = float(data_vis['Close'].iloc[i])
         date = data_vis.index[i]
 
-        # Equity
+        # Equity-Berechnung: Cash + Marktwert offener Position
         if position == 1:
+            # Long: Einheiten = positionswert / initial_price
             units = positionswert / initial_price
             equity = units * price_today
         elif position == -1:
+            # Short: positionswert als Margin, Gewinn/Verlust aus Preisdifferenz
             units = positionswert / initial_price
             equity = positionswert + (initial_price - price_today) * units
         else:
+            # Neutral: nur Cash
             equity = wealth
 
+        # Equity und Position speichern
         wealth_history.append(equity)
         position_history.append(position)
 
+        # Signallogik wie gehabt
         ma_s_t = float(data_vis['MA_short'].iloc[i])
         ma_l_t = float(data_vis['MA_long'].iloc[i])
         if i > 0:
-            ma_s_y = float(data_vis['MA_short'].iloc[i-1])
-            ma_l_y = float(data_vis['MA_long'].iloc[i-1])
+            ma_s_y = float(data_vis['MA_short'].iloc[i - 1])
+            ma_l_y = float(data_vis['MA_long'].iloc[i - 1])
         else:
             ma_s_y = ma_l_y = 0
 
-        # Buy signal
+        # Kaufsignal (Long eröffnen)
         if ma_s_t > ma_l_t and ma_s_y <= ma_l_y and position == 0:
             initial_price = price_today
             position = 1
@@ -175,12 +189,16 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
             positionswert = wealth - buy_fee
             wealth -= positionswert
             trades.append({
-                'Typ': 'Kauf', 'Datum': date, 'Kurs': price_today,
-                'Spesen': buy_fee, 'Positionswert': positionswert,
-                'Profit/Loss': None, 'Kumulative P&L': cumulative_pnl
+                'Typ': 'Kauf',
+                'Datum': date,
+                'Kurs': price_today,
+                'Spesen': buy_fee,
+                'Positionswert': positionswert,
+                'Profit/Loss': None,
+                'Kumulative P&L': cumulative_pnl
             })
 
-        # Sell long
+        # Verkaufssignal (Long schließen)
         if ma_s_t < ma_l_t and ma_s_y >= ma_l_y and position == 1:
             position = 0
             gross = (price_today - initial_price) / initial_price * positionswert
@@ -189,12 +207,16 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
             cumulative_pnl += net
             wealth += positionswert + net
             trades.append({
-                'Typ': 'Verkauf (Long)', 'Datum': date, 'Kurs': price_today,
-                'Spesen': sell_fee, 'Positionswert': None,
-                'Profit/Loss': net, 'Kumulative P&L': cumulative_pnl
+                'Typ': 'Verkauf (Long)',
+                'Datum': date,
+                'Kurs': price_today,
+                'Spesen': sell_fee,
+                'Positionswert': None,
+                'Profit/Loss': net,
+                'Kumulative P&L': cumulative_pnl
             })
 
-        # Short
+        # Short-Signal (Short eröffnen)
         if ma_s_t < ma_l_t and ma_s_y >= ma_l_y and position == 0:
             initial_price = price_today
             position = -1
@@ -202,12 +224,16 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
             positionswert = wealth - short_fee
             wealth -= positionswert
             trades.append({
-                'Typ': 'Short-Sell', 'Datum': date, 'Kurs': price_today,
-                'Spesen': short_fee, 'Positionswert': positionswert,
-                'Profit/Loss': None, 'Kumulative P&L': cumulative_pnl
+                'Typ': 'Short-Sell',
+                'Datum': date,
+                'Kurs': price_today,
+                'Spesen': short_fee,
+                'Positionswert': positionswert,
+                'Profit/Loss': None,
+                'Kumulative P&L': cumulative_pnl
             })
 
-        # Cover + go long
+        # Short-Cover + direkt neu kaufen
         if ma_s_t > ma_l_t and ma_s_y <= ma_l_y and position == -1:
             gross = (initial_price - price_today) / initial_price * positionswert
             cover_fee = 0
@@ -215,11 +241,16 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
             cumulative_pnl += net_cover
             wealth += positionswert + net_cover
             trades.append({
-                'Typ': 'Short-Cover', 'Datum': date, 'Kurs': price_today,
-                'Spesen': cover_fee, 'Positionswert': None,
-                'Profit/Loss': net_cover, 'Kumulative P&L': cumulative_pnl
+                'Typ': 'Short-Cover',
+                'Datum': date,
+                'Kurs': price_today,
+                'Spesen': cover_fee,
+                'Positionswert': None,
+                'Profit/Loss': net_cover,
+                'Kumulative P&L': cumulative_pnl
             })
-            # sofort Long
+
+            # Direkt neues Long eröffnen
             initial_price = price_today
             position = 1
             buy_fee = 0
@@ -227,12 +258,15 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
             wealth -= positionswert
             trades.append({
                 'Typ': 'Kauf (nach Short-Cover)',
-                'Datum': date, 'Kurs': price_today,
-                'Spesen': buy_fee, 'Positionswert': positionswert,
-                'Profit/Loss': None, 'Kumulative P&L': cumulative_pnl
+                'Datum': date,
+                'Kurs': price_today,
+                'Spesen': buy_fee,
+                'Positionswert': positionswert,
+                'Profit/Loss': None,
+                'Kumulative P&L': cumulative_pnl
             })
 
-    # close open position
+    # Offene Position zum Schluss schließen
     if position != 0:
         last_price = float(data_vis['Close'].iloc[-1])
         last_date = data_vis.index[-1]
@@ -245,34 +279,60 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         cumulative_pnl += net_close
         wealth += positionswert + net_close
         trades.append({
-            'Typ': 'Schließen (Ende)', 'Datum': last_date, 'Kurs': last_price,
-            'Spesen': close_fee, 'Positionswert': None,
-            'Profit/Loss': net_close, 'Kumulative P&L': cumulative_pnl
+            'Typ': 'Schließen (Ende)',
+            'Datum': last_date,
+            'Kurs': last_price,
+            'Spesen': close_fee,
+            'Positionswert': None,
+            'Profit/Loss': net_close,
+            'Kumulative P&L': cumulative_pnl
         })
+        # Letzten Equity-Wert überschreiben, weil hier geschlossen wurde
         wealth_history[-1] = wealth
 
     trades_df = pd.DataFrame(trades)
-    strategy_return    = (wealth - start_capital) / start_capital * 100
-    buy_and_hold_return = (data_vis['Close'].iloc[-1] - data_vis['Close'].iloc[0]) \
-                          / data_vis['Close'].iloc[0] * 100
 
+    # Renditen berechnen (jetzt relativ zum start_capital)
+    strategy_return = (wealth - start_capital) / start_capital * 100
+    buy_and_hold_return = (data_vis['Close'].iloc[-1] - data_vis['Close'].iloc[0]) / data_vis['Close'].iloc[0] * 100
+
+    # Statistik zu positiven/negativen Trades
     pos_trades = trades_df[trades_df['Profit/Loss'] > 0]
     neg_trades = trades_df[trades_df['Profit/Loss'] < 0]
-    pos_count  = len(pos_trades)
-    neg_count  = len(neg_trades)
-    pos_pnl    = pos_trades['Profit/Loss'].sum()
-    neg_pnl    = neg_trades['Profit/Loss'].sum()
-    total_trades = len(trades_df)
-    closed_trades = pos_count + neg_count
-    pos_pct = pos_count/closed_trades*100 if closed_trades else 0
-    neg_pct = neg_count/closed_trades*100 if closed_trades else 0
-    total_pnl = pos_pnl + neg_pnl
-    pos_perf  = pos_pnl/total_pnl*100 if total_pnl else 0
-    neg_perf  = neg_pnl/total_pnl*100 if total_pnl else 0
+    pos_count = len(pos_trades)
+    neg_count = len(neg_trades)
+    pos_pnl = pos_trades['Profit/Loss'].sum()
+    neg_pnl = neg_trades['Profit/Loss'].sum()
 
-    df_plot = data_vis[['Close']].copy().iloc[-len(wealth_history):]
+    # Gesamtzahl der Einträge (Entry + Exit)
+    total_trades = len(trades_df)
+
+    # Anzahl aller tatsächlich abgeschlossenen Exit-Trades
+    closed_trades = pos_count + neg_count
+
+    # Korrekte Prozentberechnung: nur auf abgeschlossene Trades bezogen
+    if closed_trades > 0:
+        pos_pct = pos_count / closed_trades * 100
+        neg_pct = neg_count / closed_trades * 100
+    else:
+        pos_pct = neg_pct = 0
+
+    total_pnl = pos_pnl + neg_pnl
+    if total_pnl != 0:
+        pos_perf = pos_pnl / total_pnl * 100
+        neg_perf = neg_pnl / total_pnl * 100
+    else:
+        pos_perf = neg_perf = 0
+
+    # DataFrame für Plot vorbereiten (Close und Position)
+    df_plot = data_vis[['Close']].copy().iloc[len(data_vis) - len(position_history):]
     df_plot['Position'] = position_history
-    df_wealth = pd.DataFrame({"Datum": data_vis.index, "Wealth": wealth_history})
+
+    # <<< HIER: DataFrame für Equity Curve erzeugen
+    df_wealth = pd.DataFrame({
+        "Datum": data_vis.index,       # data_vis.index ist ein DatetimeIndex
+        "Wealth": wealth_history       # wealth_history wurde im Loop befüllt
+    })
 
     return {
         "trades_df": trades_df,
@@ -292,93 +352,81 @@ def optimize_and_run(ticker: str, start_date_str: str, start_capital: float):
         "neg_perf": neg_perf,
         "df_plot": df_plot,
         "df_wealth": df_wealth,
+        # **neu**:
         "best_individual": best,
         "logbook": logbook
     }
 
-# -----------------------------------------------------------------------------
-# Streamlit-UI
-# -----------------------------------------------------------------------------
-def main():
-    st.title("✨ AI Quant Model")
-    st.markdown(
-        "Bitte wähle unten den Ticker (Yahoo Finance), den Beginn des Zeitraums und das Startkapital aus."
-    )
 
-    # 1️⃣ Suchfeld
-    search_text = st.text_input(
-        "Ticker suchen (Autocomplete)",
-        placeholder="z.B. AAPL, MSFT, GOOG"
-    )
 
-    # falls der Nutzer mindestens 2 Zeichen eingibt, holen wir Vorschläge
-    options: list[str] = []
-    if len(search_text) > 1:
-        suggestions = yahoo_search_suggestions(search_text)
-        options = [f"{sym} – {name}" for sym, name in suggestions]
 
-    # 2️⃣ Selectbox mit Vorschlägen
-    ticker_select = st.selectbox("Gefundene Symbole", [""] + options)
+# ---------------------------------------
+# Streamlit-App
+# ---------------------------------------
+st.title("✨ AI Quant LS Model - INCLR")
 
-    # 3️⃣ Manueller Fallback
-    ticker_manual = st.text_input("ODER manuell eingeben", placeholder="z.B. GOOG")
+st.markdown("""
+Bitte wähle unten den Ticker (Yahoo Finance) , den Beginn des Zeitraums und das Startkapital aus.  
+""")
 
-    # ticker_input: erst Selectbox (vor dem " – "), sonst manuell
-    if ticker_select:
-        ticker_input = ticker_select.split(" – ")[0]
+# ------------------------------
+# Eingabefelder für Ticker / Zeitfenster / Startkapital
+# ------------------------------
+ticker_input = st.text_input(
+    label="1️⃣ Welchen Aktien-Ticker möchtest du analysieren?",
+    value="",  # leerer Standardwert
+    help="Gib hier das Tickersymbol ein, z.B. 'AAPL', 'MSFT' oder 'O'."
+)
+
+start_date_input = st.date_input(
+    label="2️⃣ Beginn des Analyse-Zeitraums",
+    value=date(2024, 1, 1),
+    max_value=date.today(),
+    help="Wähle das Startdatum (bis heute)."
+)
+
+start_capital_input = st.number_input(
+    label="3️⃣ Startkapital (€)",
+    value=10000,       # als Integer
+    min_value=1000,    # ebenfalls Integer
+    step=500,          # Schrittweite in ganzen Euro
+    format="%d",       # zeigt keine Dezimalstellen an
+    help="Gib das Startkapital in ganzen Euro ein (ab € 1.000)."
+)
+
+st.markdown("---")
+
+# -------------
+# Button zum Starten der Berechnung
+# -------------
+run_button = st.button("🔄 Ergebnisse berechnen")
+
+# nur wenn der Button gedrückt wurde und ein Ticker eingegeben ist:
+if run_button:
+    if ticker_input.strip() == "":
+        st.error("Bitte gib zunächst einen gültigen Ticker ein, z. B. 'AAPL' oder 'MSFT'.")
     else:
-        ticker_input = ticker_manual.strip()
-
-    # 4️⃣ Datum & Kapital
-    start_date_input = st.date_input(
-        "Beginn des Analyse-Zeitraums",
-        value=date(2024, 1, 1),
-        max_value=date.today()
-    )
-    start_capital_input = st.number_input(
-        "Startkapital (€)",
-        value=10000,
-        min_value=1000,
-        step=500,
-        format="%d"
-    )
-
-    st.markdown("---")
-
-    # 5️⃣ Run-Button
-    run_button = st.button("🔄 Ergebnisse berechnen")
-
-    # erst hier führen wir den Backtest aus
-    if run_button:
-        if not ticker_input:
-            st.error("Bitte gib zunächst einen gültigen Ticker ein, z. B. 'AAPL' oder 'MSFT'.")
-            return
-
         start_date_str = start_date_input.strftime("%Y-%m-%d")
         with st.spinner("⏳ Berechne Signale und Trades… bitte einen Moment warten"):
-            results = optimize_and_run(
-                ticker=ticker_input,
-                start_date=start_date_str,
-                start_capital=float(start_capital_input)
-            )
-        # Ergebnisse entpacken
-        trades_df           = results["trades_df"]
-        strategy_return     = results["strategy_return"]
+            results = optimize_and_run(ticker_input, start_date_str, float(start_capital_input))
+
+        trades_df = results["trades_df"]
+        strategy_return = results["strategy_return"]
         buy_and_hold_return = results["buy_and_hold_return"]
-        total_trades        = results["total_trades"]
-        long_trades         = results["long_trades"]
-        short_trades        = results["short_trades"]
-        pos_count           = results["pos_count"]
-        neg_count           = results["neg_count"]
-        pos_pct             = results["pos_pct"]
-        neg_pct             = results["neg_pct"]
-        pos_pnl             = results["pos_pnl"]
-        neg_pnl             = results["neg_pnl"]
-        total_pnl           = results["total_pnl"]
-        pos_perf            = results["pos_perf"]
-        neg_perf            = results["neg_perf"]
-        df_plot             = results["df_plot"]
-        df_wealth           = results["df_wealth"]
+        total_trades = results["total_trades"]
+        long_trades = results["long_trades"]
+        short_trades = results["short_trades"]
+        pos_count = results["pos_count"]
+        neg_count = results["neg_count"]
+        pos_pct = results["pos_pct"]
+        neg_pct = results["neg_pct"]
+        pos_pnl = results["pos_pnl"]
+        neg_pnl = results["neg_pnl"]
+        total_pnl = results["total_pnl"]
+        pos_perf = results["pos_perf"]
+        neg_perf = results["neg_perf"]
+        df_plot = results["df_plot"]
+        df_wealth = results["df_wealth"]
 
         # ---------------------------------------
         # 1. Performance-Vergleich (Strategie vs. Buy & Hold)
@@ -719,5 +767,31 @@ def main():
         st.pyplot(fig_single)
 
 
-if __name__ == "__main__":
-    main()
+        # ───────────────────────────────────────────────────
+        # 🔧 Optimierungsergebnisse (neu)
+        st.markdown("---")
+        st.subheader("🔧 Optimierungsergebnisse")
+        
+        # Metriken für die optimalen MAs
+        best_short, best_long = results["best_individual"]
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric("✨ MA kurz (optimal)", f"{best_short:.2f}")
+        with col_b:
+            st.metric("✨ MA lang (optimal)", f"{best_long:.2f}")
+        
+        # Fitness-Verlauf über die Generationen
+        logbook = results["logbook"]
+        df_log = pd.DataFrame(logbook)
+
+        
+        fig_opt, ax_opt = plt.subplots(figsize=(8, 4))
+        ax_opt.plot(df_log["gen"], df_log["max"],    label="Max Sharpe", linewidth=2)
+        ax_opt.plot(df_log["gen"], df_log["avg"],    label="Avg Sharpe", linewidth=1.5)
+        ax_opt.fill_between(df_log["gen"], df_log["min"], df_log["max"], alpha=0.2)
+        ax_opt.set_xlabel("Generation", fontsize=11)
+        ax_opt.set_ylabel("Sharpe Ratio", fontsize=11)
+        ax_opt.set_title("Optimierungsverlauf (Sharpe Ratio)", fontsize=13)
+        ax_opt.grid(True, linestyle="--", alpha=0.4)
+        ax_opt.legend(frameon=True, fontsize=10)
+        st.pyplot(fig_opt)
